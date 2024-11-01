@@ -116,10 +116,6 @@ class ImageDataset(Dataset):
 
 
 class DuplicateRemover(object):
-    """
-    A class to remove duplicate images from a dataset based on image embeddings.
-    """
-
     def __init__(
         self,
         model_name: str,
@@ -131,28 +127,12 @@ class DuplicateRemover(object):
         pin_memory: bool = True,
         logger: Optional[logging.Logger] = None,
     ):
-        """Initializes the DuplicateRemover object.
-
-        Attributes:
-            model_name (str): Name of the model used for generating embeddings.
-            device (str): Device to use for computations.
-            threshold (float):
-                Threshold for cosine similarity to consider images as duplicates.
-            max_compare_size (int): Maximum number of images to compare at once.
-            dataloader_batch_size (int): Batch size for the DataLoader.
-            dataloader_num_workers (int): Number of worker threads for DataLoader.
-            pin_memory (bool): Whether to use pinned memory in DataLoader.
-            logger (logging.Logger): Logger for logging information.
-        """
         if logger is None:
             self.logger = logging.getLogger()
         else:
             self.logger = logger
-        if device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        else:
-            self.device = device
-        self.logger.info(f"Loading {model_name} ...")
+        self.device = torch.device(device if device else ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.logger.info(f"Loading {model_name} on {self.device}...")
         self.model = timm.create_model(model_name, pretrained=True).to(self.device)
         self.model.eval()
 
@@ -172,18 +152,9 @@ class DuplicateRemover(object):
             pin_memory=self.pin_memory,
             shuffle=False,
         )
-        """
-        Compute embeddings for all images in the dataset.
-
-        Args:
-            dataset: Dataset containing images.
-
-        Returns:
-            np.ndarray: Array of embeddings of shape n_images x n_featuers.
-        """
         embeddings = []
 
-        with torch.no_grad(), torch.autocast(device_type=self.device):
+        with torch.no_grad(), torch.autocast(device_type=self.device.type):
             for _, images in tqdm(dataloader):
                 images = images.to(self.device)
                 features = self.model(images)
@@ -191,19 +162,7 @@ class DuplicateRemover(object):
 
         return np.vstack(embeddings)
 
-    def get_duplicate(
-        self, embeddings: np.ndarray, indices: Optional[np.ndarray] = None
-    ) -> Tuple[Set[int], Set[int]]:
-        """
-        Identify duplicate images based on embeddings.
-
-        Args:
-            embeddings (np.ndarray): Array of embeddings.
-            indices (Optional[np.ndarray]): Indices of embeddings to consider.
-
-        Returns:
-            Tuple[Set[int], Set[int]]: Sets of indices to remove and keep.
-        """
+    def get_duplicate(self, embeddings: np.ndarray, indices: Optional[np.ndarray] = None) -> Tuple[Set[int], Set[int]]:
         if indices is None:
             indices = np.arange(len(embeddings))
         embeddings = embeddings[indices]
@@ -216,32 +175,20 @@ class DuplicateRemover(object):
         for idx in tqdm(range(len(embeddings))):
             sample_id = indices[idx]
             if sample_id not in samples_to_remove:
-                # Keep the first instance of two duplicates
                 samples_to_keep.add(sample_id)
-
                 dup_idxs = np.where(similarity_matrix[idx] > self.threshold)[0]
                 for dup in dup_idxs:
-                    # We kept the first instance so remove all other duplicates
                     samples_to_remove.add(indices[dup])
         return samples_to_remove, samples_to_keep
 
     def remove_similar(self, dataset: ImageDataset):
-        """
-        Remove similar images from the dataset.
-
-        Args:
-            dataset: Dataset containing images.
-        """
         self.logger.info(f"Compute embeddings for {len(dataset)} images ...")
         embeddings = self.compute_embeddings(dataset)
 
         samples_to_remove = set()
-
         for k in range(0, len(embeddings), self.max_compare_size):
             end = min(k + self.max_compare_size, len(embeddings))
-            samples_to_remove_sub, _ = self.get_duplicate(
-                embeddings, indices=np.arange(k, end)
-            )
+            samples_to_remove_sub, _ = self.get_duplicate(embeddings, indices=np.arange(k, end))
             samples_to_remove = samples_to_remove | samples_to_remove_sub
 
         self.logger.info("Removing similar images ...")
@@ -254,25 +201,10 @@ class DuplicateRemover(object):
                     os.remove(related_path)
 
     def remove_similar_from_dir(self, dirpath: str, portion: Optional[str] = None):
-        """
-        Remove similar images from a directory.
-
-        Args:
-            dirpath (str):
-                Path to the directory containing images.
-            portion (Optional[str]):
-                Specifies which portion of images to consider ('first' or 'last').
-                Useful for removing duplicates from opening and ending of animes.
-                This assumes that different episodes are stored in different subfolders,
-                and that the extracted frames follow a specific naming convention so
-                that their numbers can be extracted.
-        """
         if portion:
             rtype = "op" if portion == "first" else "ed"
             self.logger.info(f"Removing {rtype} duplicates for '{dirpath}' ...")
-            dataset = ImageDataset.from_subdirectories(
-                dirpath, self.transform, portion=portion
-            )
+            dataset = ImageDataset.from_subdirectories(dirpath, self.transform, portion=portion)
         else:
             self.logger.info(f"Removing duplicates for '{dirpath}' ...")
             dataset = ImageDataset.from_directory(dirpath, self.transform)
